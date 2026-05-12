@@ -751,6 +751,8 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
+	totalNuclei := totalNucleiFindings(nucleiCounts)
+
 	fmt.Fprintln(w, "<!doctype html>")
 	fmt.Fprintln(w, "<html lang=\"en\">")
 	fmt.Fprintln(w, "<head>")
@@ -758,28 +760,73 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 	fmt.Fprintln(w, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
 	fmt.Fprintln(w, "  <title>Reconnaissance Summary Report</title>")
 	fmt.Fprintln(w, "  <style>")
-	fmt.Fprintln(w, "    body { font-family: Arial, sans-serif; margin: 24px; color: #1f2937; background: #f8fafc; }")
-	fmt.Fprintln(w, "    h1, h2 { margin: 0 0 12px 0; }")
-	fmt.Fprintln(w, "    .meta { margin-bottom: 20px; color: #374151; }")
-	fmt.Fprintln(w, "    table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 20px; }")
-	fmt.Fprintln(w, "    th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }")
-	fmt.Fprintln(w, "    th { background: #f1f5f9; }")
-	fmt.Fprintln(w, "    ul { background: #fff; border: 1px solid #e5e7eb; padding: 12px 18px; margin: 0 0 20px 0; }")
-	fmt.Fprintln(w, "    code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }")
+	fmt.Fprintln(w, "    :root { color-scheme: light dark; }")
+	fmt.Fprintln(w, "    * { box-sizing: border-box; }")
+	fmt.Fprintln(w, "    body { margin: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif; background: linear-gradient(180deg, #0b1220 0%, #0f172a 100%); color: #e2e8f0; }")
+	fmt.Fprintln(w, "    .container { max-width: 1200px; margin: 0 auto; padding: 28px 18px 36px; }")
+	fmt.Fprintln(w, "    .hero { background: rgba(15,23,42,.75); border: 1px solid rgba(148,163,184,.25); border-radius: 18px; padding: 22px; backdrop-filter: blur(6px); }")
+	fmt.Fprintln(w, "    .hero h1 { margin: 0 0 8px; font-size: 1.8rem; color: #f8fafc; }")
+	fmt.Fprintln(w, "    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }")
+	fmt.Fprintln(w, "    .pill { background: rgba(30,41,59,.9); border: 1px solid rgba(148,163,184,.25); padding: 8px 10px; border-radius: 999px; color: #cbd5e1; font-size: .87rem; }")
+	fmt.Fprintln(w, "    .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(170px,1fr)); gap: 12px; margin-top: 16px; }")
+	fmt.Fprintln(w, "    .card { background: rgba(15,23,42,.85); border: 1px solid rgba(148,163,184,.22); border-radius: 14px; padding: 12px; }")
+	fmt.Fprintln(w, "    .card .k { font-size: .78rem; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; }")
+	fmt.Fprintln(w, "    .card .v { margin-top: 6px; font-size: 1.5rem; font-weight: 700; color: #f8fafc; }")
+	fmt.Fprintln(w, "    section { margin-top: 16px; background: rgba(15,23,42,.85); border: 1px solid rgba(148,163,184,.2); border-radius: 14px; padding: 16px; }")
+	fmt.Fprintln(w, "    h2 { margin: 0 0 12px; font-size: 1.08rem; color: #f8fafc; }")
+	fmt.Fprintln(w, "    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 10px; }")
+	fmt.Fprintln(w, "    th, td { text-align: left; padding: 10px 11px; border-bottom: 1px solid rgba(148,163,184,.18); vertical-align: top; }")
+	fmt.Fprintln(w, "    th { font-size: .82rem; letter-spacing: .04em; text-transform: uppercase; color: #cbd5e1; background: rgba(30,41,59,.85); }")
+	fmt.Fprintln(w, "    tr:hover td { background: rgba(30,41,59,.35); }")
+	fmt.Fprintln(w, "    ul { margin: 0; padding-left: 18px; color: #dbeafe; }")
+	fmt.Fprintln(w, "    li { margin: 6px 0; }")
+	fmt.Fprintln(w, "    a { color: #93c5fd; text-decoration: none; word-break: break-all; }")
+	fmt.Fprintln(w, "    a:hover { text-decoration: underline; }")
+	fmt.Fprintln(w, "    .sev { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }")
+	fmt.Fprintln(w, "    .sev-critical { background: rgba(220,38,38,.2); color: #fecaca; border: 1px solid rgba(239,68,68,.45); }")
+	fmt.Fprintln(w, "    .sev-high { background: rgba(249,115,22,.2); color: #fed7aa; border: 1px solid rgba(251,146,60,.45); }")
+	fmt.Fprintln(w, "    .sev-medium { background: rgba(234,179,8,.2); color: #fef08a; border: 1px solid rgba(250,204,21,.45); }")
+	fmt.Fprintln(w, "    .sev-low, .sev-info, .sev-unknown { background: rgba(59,130,246,.2); color: #bfdbfe; border: 1px solid rgba(96,165,250,.45); }")
+	fmt.Fprintln(w, "    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }")
+	fmt.Fprintln(w, "    @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }")
 	fmt.Fprintln(w, "  </style>")
 	fmt.Fprintln(w, "</head>")
 	fmt.Fprintln(w, "<body>")
-	fmt.Fprintln(w, "  <h1>Reconnaissance Summary Report</h1>")
-	fmt.Fprintf(w, "  <div class=\"meta\"><strong>Scan Date:</strong> %s<br><strong>Output Directory:</strong> <code>%s</code><br><strong>Profile:</strong> %s<br><strong>Nuclei severities:</strong> %s</div>\n",
+	fmt.Fprintln(w, "  <div class=\"container\">")
+	fmt.Fprintln(w, "    <div class=\"hero\">")
+	fmt.Fprintln(w, "      <h1>Reconnaissance Summary Report</h1>")
+	fmt.Fprintln(w, "      <div class=\"meta\">")
+	fmt.Fprintf(w, "        <span class=\"pill\">Scan Date: %s</span>\n",
 		html.EscapeString(time.Now().Format(time.RFC1123)),
+	)
+	fmt.Fprintf(w, "        <span class=\"pill\">Output: %s</span>\n",
 		html.EscapeString(cfg.outputDir),
+	)
+	fmt.Fprintf(w, "        <span class=\"pill\">Profile: %s</span>\n",
 		html.EscapeString(cfg.profile),
+	)
+	fmt.Fprintf(w, "        <span class=\"pill\">Nuclei: %s</span>\n",
 		html.EscapeString(cfg.nucleiSeverity),
 	)
-	fmt.Fprintln(w, "  <h2>Live Hosts Summary</h2>")
-	fmt.Fprintln(w, "  <table>")
-	fmt.Fprintln(w, "    <thead><tr><th>URL</th><th>Status</th><th>Title</th><th>Technology</th></tr></thead>")
-	fmt.Fprintln(w, "    <tbody>")
+	fmt.Fprintln(w, "      </div>")
+	fmt.Fprintln(w, "      <div class=\"cards\">")
+	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Live Hosts</div><div class=\"v\">%d</div></div>\n", len(entries))
+	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Crawled URLs</div><div class=\"v\">%d</div></div>\n", len(allURLs))
+	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Dirsearch Paths</div><div class=\"v\">%d</div></div>\n", func() int {
+		t := 0
+		for _, c := range dirsearchCounts {
+			t += c
+		}
+		return t
+	}())
+	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Nuclei Findings</div><div class=\"v\">%d</div></div>\n", totalNuclei)
+	fmt.Fprintln(w, "      </div>")
+	fmt.Fprintln(w, "    </div>")
+	fmt.Fprintln(w, "    <section>")
+	fmt.Fprintln(w, "      <h2>Live Hosts Summary</h2>")
+	fmt.Fprintln(w, "      <table>")
+	fmt.Fprintln(w, "        <thead><tr><th>URL</th><th>Status</th><th>Title</th><th>Technology</th></tr></thead>")
+	fmt.Fprintln(w, "        <tbody>")
 
 	for _, e := range entries {
 		statusCode := "N/A"
@@ -796,10 +843,13 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 		)
 	}
 
-	fmt.Fprintln(w, "    </tbody>")
-	fmt.Fprintln(w, "  </table>")
-	fmt.Fprintln(w, "  <h2>Crawl Statistics</h2>")
-	fmt.Fprintln(w, "  <ul>")
+	fmt.Fprintln(w, "        </tbody>")
+	fmt.Fprintln(w, "      </table>")
+	fmt.Fprintln(w, "    </section>")
+	fmt.Fprintln(w, "    <div class=\"grid2\">")
+	fmt.Fprintln(w, "      <section>")
+	fmt.Fprintln(w, "        <h2>Crawl Statistics</h2>")
+	fmt.Fprintln(w, "        <ul>")
 
 	hosts := make([]string, 0, len(hostCounts))
 	for host := range hostCounts {
@@ -807,45 +857,56 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 	}
 	sort.Strings(hosts)
 	for _, host := range hosts {
-		fmt.Fprintf(w, "    <li><strong>%s:</strong> %d URLs discovered</li>\n", html.EscapeString(host), hostCounts[host])
+		fmt.Fprintf(w, "          <li><strong>%s:</strong> %d URLs discovered</li>\n", html.EscapeString(host), hostCounts[host])
 	}
-	fmt.Fprintln(w, "  </ul>")
+	fmt.Fprintln(w, "        </ul>")
+	fmt.Fprintln(w, "      </section>")
 
-	fmt.Fprintln(w, "  <h2>Sample Discovered URLs (First 20)</h2>")
-	fmt.Fprintln(w, "  <ul>")
+	fmt.Fprintln(w, "      <section>")
+	fmt.Fprintln(w, "        <h2>Sample Discovered URLs (First 20)</h2>")
+	fmt.Fprintln(w, "        <ul>")
 	limit := 20
 	if len(allURLs) < limit {
 		limit = len(allURLs)
 	}
 	for i := 0; i < limit; i++ {
-		fmt.Fprintf(w, "    <li><a href=\"%s\" target=\"_blank\" rel=\"noopener noreferrer\">%s</a></li>\n", html.EscapeString(allURLs[i]), html.EscapeString(allURLs[i]))
+		fmt.Fprintf(w, "          <li><a href=\"%s\" target=\"_blank\" rel=\"noopener noreferrer\">%s</a></li>\n", html.EscapeString(allURLs[i]), html.EscapeString(allURLs[i]))
 	}
 	if len(allURLs) > limit {
-		fmt.Fprintf(w, "    <li>... and %d more URLs</li>\n", len(allURLs)-limit)
+		fmt.Fprintf(w, "          <li>... and %d more URLs</li>\n", len(allURLs)-limit)
 	}
-	fmt.Fprintln(w, "  </ul>")
-	fmt.Fprintln(w, "  <h2>Dirsearch Results by Host</h2>")
-	fmt.Fprintln(w, "  <ul>")
+	fmt.Fprintln(w, "        </ul>")
+	fmt.Fprintln(w, "      </section>")
+	fmt.Fprintln(w, "    </div>")
+	fmt.Fprintln(w, "    <div class=\"grid2\">")
+	fmt.Fprintln(w, "      <section>")
+	fmt.Fprintln(w, "        <h2>Dirsearch Results by Host</h2>")
+	fmt.Fprintln(w, "        <ul>")
 	dsHosts := make([]string, 0, len(dirsearchCounts))
 	for host := range dirsearchCounts {
 		dsHosts = append(dsHosts, host)
 	}
 	sort.Strings(dsHosts)
 	for _, host := range dsHosts {
-		fmt.Fprintf(w, "    <li><strong>%s:</strong> %d paths discovered</li>\n", html.EscapeString(host), dirsearchCounts[host])
+		fmt.Fprintf(w, "          <li><strong>%s:</strong> %d paths discovered</li>\n", html.EscapeString(host), dirsearchCounts[host])
 	}
-	fmt.Fprintln(w, "  </ul>")
-	fmt.Fprintln(w, "  <h2>Nuclei Findings</h2>")
-	fmt.Fprintln(w, "  <ul>")
+	fmt.Fprintln(w, "        </ul>")
+	fmt.Fprintln(w, "      </section>")
+	fmt.Fprintln(w, "      <section>")
+	fmt.Fprintln(w, "        <h2>Nuclei Findings</h2>")
+	fmt.Fprintln(w, "        <ul>")
 	for _, sev := range []string{"critical", "high", "medium", "low", "info", "unknown"} {
-		fmt.Fprintf(w, "    <li><strong>%s:</strong> %d</li>\n", html.EscapeString(strings.Title(sev)), nucleiCounts[sev])
+		fmt.Fprintf(w, "          <li><span class=\"sev sev-%s\">%s</span> %d</li>\n", html.EscapeString(sev), html.EscapeString(strings.Title(sev)), nucleiCounts[sev])
 	}
-	fmt.Fprintln(w, "  </ul>")
+	fmt.Fprintln(w, "        </ul>")
+	fmt.Fprintln(w, "      </section>")
+	fmt.Fprintln(w, "    </div>")
 	if len(nucleiFindings) > 0 {
-		fmt.Fprintln(w, "  <h2>Sample Nuclei Findings (First 20)</h2>")
-		fmt.Fprintln(w, "  <table>")
-		fmt.Fprintln(w, "    <thead><tr><th>Severity</th><th>Template ID</th><th>Name</th><th>Matched At</th></tr></thead>")
-		fmt.Fprintln(w, "    <tbody>")
+		fmt.Fprintln(w, "    <section>")
+		fmt.Fprintln(w, "      <h2>Sample Nuclei Findings (First 20)</h2>")
+		fmt.Fprintln(w, "      <table>")
+		fmt.Fprintln(w, "        <thead><tr><th>Severity</th><th>Template ID</th><th>Name</th><th>Matched At</th></tr></thead>")
+		fmt.Fprintln(w, "        <tbody>")
 		limit := 20
 		if len(nucleiFindings) < limit {
 			limit = len(nucleiFindings)
@@ -853,7 +914,8 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 		for i := 0; i < limit; i++ {
 			f := nucleiFindings[i]
 			fmt.Fprintf(w,
-				"      <tr><td>%s</td><td>%s</td><td>%s</td><td><a href=\"%s\" target=\"_blank\" rel=\"noopener noreferrer\">%s</a></td></tr>\n",
+				"          <tr><td><span class=\"sev sev-%s\">%s</span></td><td>%s</td><td>%s</td><td><a href=\"%s\" target=\"_blank\" rel=\"noopener noreferrer\">%s</a></td></tr>\n",
+				html.EscapeString(f.Severity),
 				html.EscapeString(strings.Title(f.Severity)),
 				html.EscapeString(f.TemplateID),
 				html.EscapeString(f.Name),
@@ -861,9 +923,11 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 				html.EscapeString(f.MatchedAt),
 			)
 		}
-		fmt.Fprintln(w, "    </tbody>")
-		fmt.Fprintln(w, "  </table>")
+		fmt.Fprintln(w, "        </tbody>")
+		fmt.Fprintln(w, "      </table>")
+		fmt.Fprintln(w, "    </section>")
 	}
+	fmt.Fprintln(w, "  </div>")
 	fmt.Fprintln(w, "</body>")
 	fmt.Fprintln(w, "</html>")
 	return nil
