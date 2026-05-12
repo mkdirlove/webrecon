@@ -37,6 +37,10 @@ type config struct {
 	outputDir          string
 	profile            string
 	nucleiSeverity     string
+	sqliTesting        bool
+	sqlmapLevel        int
+	sqlmapRisk         int
+	sqlmapThreads      int
 	diffMode           bool
 	diffBase           string
 	webhookURL         string
@@ -95,6 +99,14 @@ type diffSummary struct {
 	ResolvedNuclei          int
 	NewHighCriticalFindings []nucleiFinding
 	NewHighRiskPaths        []string
+}
+
+type sqliSummary struct {
+	ParameterizedURLCount int
+	ParameterNameCount    int
+	SQLiFindingsCount     int
+	ResultsFile           string
+	Enabled               bool
 }
 
 type safeBuffer struct {
@@ -181,6 +193,10 @@ Options:
     -o, --output DIR            Output directory (default: recon_results)
     -p, --profile PROFILE       Scan profile: quick|standard|deep (default: standard)
     -ns, --nuclei-severity S    Nuclei severities (comma-separated)
+    --no-sqli                   Disable SQLi testing stage
+    --sqlmap-level N            SQLMap test level (default: 1)
+    --sqlmap-risk N             SQLMap risk (default: 1)
+    --sqlmap-threads N          SQLMap threads (default: 2)
     --diff                      Compare current run with previous run
     --diff-base TS              Use specific baseline timestamp (YYYYMMDD_HHMMSS)
     --webhook-url URL           Send diff alerts to webhook URL
@@ -216,6 +232,10 @@ func parseArgs() config {
 	flag.StringVar(&cfg.profile, "profile", cfg.profile, "")
 	flag.StringVar(&cfg.nucleiSeverity, "ns", cfg.nucleiSeverity, "")
 	flag.StringVar(&cfg.nucleiSeverity, "nuclei-severity", cfg.nucleiSeverity, "")
+	noSQLi := flag.Bool("no-sqli", false, "")
+	flag.IntVar(&cfg.sqlmapLevel, "sqlmap-level", cfg.sqlmapLevel, "")
+	flag.IntVar(&cfg.sqlmapRisk, "sqlmap-risk", cfg.sqlmapRisk, "")
+	flag.IntVar(&cfg.sqlmapThreads, "sqlmap-threads", cfg.sqlmapThreads, "")
 	flag.BoolVar(&cfg.diffMode, "diff", cfg.diffMode, "")
 	flag.StringVar(&cfg.diffBase, "diff-base", cfg.diffBase, "")
 	flag.StringVar(&cfg.webhookURL, "webhook-url", cfg.webhookURL, "")
@@ -241,6 +261,7 @@ func parseArgs() config {
 		usage()
 		os.Exit(0)
 	}
+	cfg.sqliTesting = !*noSQLi
 
 	if err := finalizeConfig(&cfg, !cfg.webMode); err != nil {
 		fatalf("%v", err)
@@ -253,6 +274,10 @@ func defaultConfig() config {
 		outputDir:          "recon_results",
 		profile:            "standard",
 		nucleiSeverity:     "medium,high,critical",
+		sqliTesting:        true,
+		sqlmapLevel:        1,
+		sqlmapRisk:         1,
+		sqlmapThreads:      2,
 		diffMode:           false,
 		diffBase:           "",
 		webhookURL:         "",
@@ -329,6 +354,9 @@ func finalizeConfig(cfg *config, requireTarget bool) error {
 	cfg.nucleiSeverity = strings.TrimSpace(cfg.nucleiSeverity)
 	if cfg.nucleiSeverity == "" {
 		return errors.New("nuclei-severity cannot be empty")
+	}
+	if cfg.sqlmapLevel < 1 || cfg.sqlmapRisk < 1 || cfg.sqlmapThreads < 1 {
+		return errors.New("sqlmap-level, sqlmap-risk and sqlmap-threads must all be >= 1")
 	}
 	cfg.diffBase = strings.TrimSpace(cfg.diffBase)
 	cfg.webhookURL = strings.TrimSpace(cfg.webhookURL)
@@ -1137,6 +1165,95 @@ func readNonEmptyLines(path string) ([]string, error) {
 		}
 	}
 	return lines, sc.Err()
+}
+
+func discoverParameterizedURLs(urls []string) (parameterizedURLs []string, parameterNames []string) {
+	urlSet := make(map[string]struct{}, len(urls))
+	paramSet := make(map[string]struct{}, 128)
+
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.RawQuery == "" {
+			continue
+		}
+		values := parsed.Query()
+		if len(values) == 0 {
+			continue
+		}
+		urlSet[u] = struct{}{}
+		for key := range values {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				paramSet[key] = struct{}{}
+			}
+		}
+	}
+
+	parameterizedURLs = make([]string, 0, len(urlSet))
+	for u := range urlSet {
+		parameterizedURLs = append(parameterizedURLs, u)
+	}
+	sort.Strings(parameterizedURLs)
+
+	parameterNames = make([]string, 0, len(paramSet))
+	for p := range paramSet {
+		parameterNames = append(parameterNames, p)
+	}
+	sort.Strings(parameterNames)
+
+	return parameterizedURLs, parameterNames
+}
+
+func writeLines(path string, lines []string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			fmt.Fprintln(w, line)
+		}
+	}
+	return nil
+}
+
+func countSQLMapFindings(resultsFile string) int {
+	return countLines(resultsFile)
+}
+
+func runSQLiTesting(paramURLsFile, sqliDir string, cfg config) (int, string, error) {
+	resultsFile := filepath.Join(sqliDir, "sqlmap_results.csv")
+	if countLines(paramURLsFile) == 0 {
+		return 0, resultsFile, nil
+	}
+
+	if _, err := resolveTool("sqlmap"); err != nil {
+		return 0, resultsFile, err
+	}
+
+	err := run("sqlmap",
+		"-m", paramURLsFile,
+		"--batch",
+		"--random-agent",
+		"--smart",
+		"--level", strconv.Itoa(cfg.sqlmapLevel),
+		"--risk", strconv.Itoa(cfg.sqlmapRisk),
+		"--threads", strconv.Itoa(cfg.sqlmapThreads),
+		"--results-file", resultsFile,
+		"--output-dir", sqliDir,
+	)
+	if err != nil {
+		return 0, resultsFile, err
+	}
+
+	return countSQLMapFindings(resultsFile), resultsFile, nil
 }
 
 func toSet(lines []string) map[string]struct{} {

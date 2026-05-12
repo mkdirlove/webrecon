@@ -203,3 +203,47 @@ Diff mode + alerts:
 ## 10. Legal notice
 
 Run this tool only against assets you own or have explicit permission to test.
+
+## SQLi parameter discovery & testing
+
+This release adds parameter discovery from crawled URLs and an optional SQL injection testing stage using `sqlmap`.
+
+Requirements:
+- `sqlmap` must be installed and available in PATH.
+
+New CLI flags:
+
+- `--no-sqli`              Disable SQLi testing stage (enabled by default)
+- `--sqlmap-level N`       SQLMap level (default: 1)
+- `--sqlmap-risk N`        SQLMap risk (default: 1)
+- `--sqlmap-threads N`     SQLMap threads (default: 2)
+
+Behavior:
+- After crawling (katana) the tool extracts URLs containing query parameters and saves them.
+- If SQLi testing is enabled, `sqlmap` is invoked against parameterized URLs in batch mode.
+- Results are written to `sqli_<timestamp>/sqlmap_results.csv` and summarized in the readable HTML and master reports.
+
+Example:
+
+```bash
+# run with SQLi testing (default)
+./webrecon -d example.com
+
+# run and disable SQLi
+./webrecon -d example.com --no-sqli
+
+# run with custom sqlmap settings
+./webrecon -d example.com --sqlmap-level 2 --sqlmap-risk 2 --sqlmap-threads 6
+```
+
+Output additions:
+
+```
+recon_results/
+├── sqli_<timestamp>/
+│   └── sqlmap_results.csv
+```
+
+Security and safety:
+- `sqlmap` is powerful; use with permission and be mindful of risk/rate settings and target impact.
+
