@@ -7,6 +7,8 @@ Automated reconnaissance pipeline with:
 - crawling (`katana`)
 - content/path discovery (`dirsearch`)
 - vulnerability scanning (`nuclei`)
+- differential change tracking (`diff mode`)
+- webhook alerts for high-signal new findings
 - HTML and master text reporting
 - optional built-in web UI
 
@@ -59,6 +61,9 @@ Options:
     -o, --output DIR            Output directory (default: recon_results)
     -p, --profile PROFILE       Scan profile: quick|standard|deep (default: standard)
     -ns, --nuclei-severity S    Nuclei severities (comma-separated)
+    --diff                      Compare current run with previous run
+    --diff-base TS              Use specific baseline timestamp (YYYYMMDD_HHMMSS)
+    --webhook-url URL           Send diff alerts to webhook URL
     --web                       Start web interface mode
     --web-addr ADDR             Web bind address (default: 127.0.0.1:8080)
     -t, --threads NUM           Threads for httpx (default: 50)
@@ -82,7 +87,38 @@ Options:
 
 You can still override any value with flags (`-t`, `-rl`, `-kd`, `-kw`, `-dt`, `-dr`, `-ns`).
 
-## 5. Web UI mode
+## 5. Diff mode and alerts
+
+Diff mode compares your current run against a previous baseline and generates:
+
+- added/removed subdomains
+- added/removed live hosts
+- added/removed URLs
+- added/removed dirsearch paths
+- new/resolved nuclei findings
+
+Usage:
+
+```bash
+# compare with latest previous run
+./webrecon -d example.com --diff
+
+# compare with specific baseline timestamp
+./webrecon -d example.com --diff --diff-base 20260513_010203
+```
+
+Webhook alerts:
+
+```bash
+./webrecon -d example.com --diff --webhook-url https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+Alert is sent when diff mode finds:
+
+- new high/critical nuclei findings
+- new high-risk discovered paths
+
+## 6. Web UI mode
 
 Start server:
 
@@ -98,11 +134,11 @@ http://127.0.0.1:8080
 
 Web UI includes:
 
-- scan form (domain/domain list, output dir, profile, nuclei severity)
+- scan form (domain/domain list, output dir, profile, nuclei severity, diff settings, webhook URL)
 - live log streaming
 - artifact links (master report + readable HTML report)
 
-## 6. Output structure
+## 7. Output structure
 
 Each scan creates timestamped directories:
 
@@ -122,10 +158,11 @@ recon_results/
 ├── nuclei_<timestamp>/
 │   ├── nuclei_findings.txt
 │   └── nuclei_findings.jsonl
+├── diff_report_<timestamp>.txt
 └── master_report_<timestamp>.txt
 ```
 
-## 7. Examples
+## 8. Examples
 
 Single domain:
 
@@ -151,12 +188,18 @@ Domain list:
 ./webrecon -l domains.txt -o output_batch
 ```
 
-## 8. Troubleshooting
+Diff mode + alerts:
+
+```bash
+./webrecon -d example.com --diff --webhook-url https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+## 9. Troubleshooting
 
 - **`httpx` option errors (like `No such option: -l`)**: you likely have the wrong `httpx` binary installed. Use ProjectDiscovery `httpx`.
 - **Tool not found**: ensure binaries are in `PATH` (or under Go bin paths like `~/go/bin`).
 - **No results**: target may block probes, DNS may fail, or no live hosts were discovered.
 
-## 9. Legal notice
+## 10. Legal notice
 
 Run this tool only against assets you own or have explicit permission to test.

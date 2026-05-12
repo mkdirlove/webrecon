@@ -37,6 +37,9 @@ type config struct {
 	outputDir          string
 	profile            string
 	nucleiSeverity     string
+	diffMode           bool
+	diffBase           string
+	webhookURL         string
 	webMode            bool
 	webAddr            string
 	threads            int
@@ -74,6 +77,24 @@ type nucleiFinding struct {
 	Name       string
 	Severity   string
 	MatchedAt  string
+}
+
+type diffSummary struct {
+	CurrentTimestamp        string
+	BaseTimestamp           string
+	ReportPath              string
+	NewSubdomains           int
+	RemovedSubdomains       int
+	NewLiveHosts            int
+	RemovedLiveHosts        int
+	NewURLs                 int
+	RemovedURLs             int
+	NewDirsearchPaths       int
+	RemovedDirsearchPaths   int
+	NewNuclei               int
+	ResolvedNuclei          int
+	NewHighCriticalFindings []nucleiFinding
+	NewHighRiskPaths        []string
 }
 
 type safeBuffer struct {
@@ -160,6 +181,9 @@ Options:
     -o, --output DIR            Output directory (default: recon_results)
     -p, --profile PROFILE       Scan profile: quick|standard|deep (default: standard)
     -ns, --nuclei-severity S    Nuclei severities (comma-separated)
+    --diff                      Compare current run with previous run
+    --diff-base TS              Use specific baseline timestamp (YYYYMMDD_HHMMSS)
+    --webhook-url URL           Send diff alerts to webhook URL
     --web                       Start web interface mode
     --web-addr ADDR             Web bind address (default: 127.0.0.1:8080)
     -t, --threads NUM           Threads for httpx (default: 50)
@@ -192,6 +216,9 @@ func parseArgs() config {
 	flag.StringVar(&cfg.profile, "profile", cfg.profile, "")
 	flag.StringVar(&cfg.nucleiSeverity, "ns", cfg.nucleiSeverity, "")
 	flag.StringVar(&cfg.nucleiSeverity, "nuclei-severity", cfg.nucleiSeverity, "")
+	flag.BoolVar(&cfg.diffMode, "diff", cfg.diffMode, "")
+	flag.StringVar(&cfg.diffBase, "diff-base", cfg.diffBase, "")
+	flag.StringVar(&cfg.webhookURL, "webhook-url", cfg.webhookURL, "")
 	flag.BoolVar(&cfg.webMode, "web", cfg.webMode, "")
 	flag.StringVar(&cfg.webAddr, "web-addr", cfg.webAddr, "")
 	flag.IntVar(&cfg.threads, "t", cfg.threads, "")
@@ -226,6 +253,9 @@ func defaultConfig() config {
 		outputDir:          "recon_results",
 		profile:            "standard",
 		nucleiSeverity:     "medium,high,critical",
+		diffMode:           false,
+		diffBase:           "",
+		webhookURL:         "",
 		webAddr:            "127.0.0.1:8080",
 		threads:            50,
 		rateLimit:          150,
@@ -299,6 +329,17 @@ func finalizeConfig(cfg *config, requireTarget bool) error {
 	cfg.nucleiSeverity = strings.TrimSpace(cfg.nucleiSeverity)
 	if cfg.nucleiSeverity == "" {
 		return errors.New("nuclei-severity cannot be empty")
+	}
+	cfg.diffBase = strings.TrimSpace(cfg.diffBase)
+	cfg.webhookURL = strings.TrimSpace(cfg.webhookURL)
+	if cfg.diffBase != "" {
+		cfg.diffMode = true
+		if !regexp.MustCompile(`^\d{8}_\d{6}$`).MatchString(cfg.diffBase) {
+			return errors.New("diff-base must be in format YYYYMMDD_HHMMSS")
+		}
+	}
+	if cfg.webhookURL != "" {
+		cfg.diffMode = true
 	}
 
 	if cfg.threads < 1 || cfg.rateLimit < 1 || cfg.katanaDepth < 1 || cfg.katanaWorkers < 1 || cfg.dirsearchThreads < 1 {
@@ -741,7 +782,7 @@ func truncate(s string, n int) string {
 	return string(r[:n])
 }
 
-func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCounts map[string]int, allURLs []string, dirsearchCounts map[string]int, nucleiCounts map[string]int, nucleiFindings []nucleiFinding) error {
+func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCounts map[string]int, allURLs []string, dirsearchCounts map[string]int, nucleiCounts map[string]int, nucleiFindings []nucleiFinding, diff *diffSummary) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -927,13 +968,29 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 		fmt.Fprintln(w, "      </table>")
 		fmt.Fprintln(w, "    </section>")
 	}
+	if diff != nil {
+		fmt.Fprintln(w, "    <section>")
+		fmt.Fprintln(w, "      <h2>Differential Summary</h2>")
+		fmt.Fprintln(w, "      <table>")
+		fmt.Fprintln(w, "        <thead><tr><th>Metric</th><th>Added</th><th>Removed</th></tr></thead>")
+		fmt.Fprintln(w, "        <tbody>")
+		fmt.Fprintf(w, "          <tr><td>Subdomains</td><td>%d</td><td>%d</td></tr>\n", diff.NewSubdomains, diff.RemovedSubdomains)
+		fmt.Fprintf(w, "          <tr><td>Live Hosts</td><td>%d</td><td>%d</td></tr>\n", diff.NewLiveHosts, diff.RemovedLiveHosts)
+		fmt.Fprintf(w, "          <tr><td>URLs</td><td>%d</td><td>%d</td></tr>\n", diff.NewURLs, diff.RemovedURLs)
+		fmt.Fprintf(w, "          <tr><td>Dirsearch Paths</td><td>%d</td><td>%d</td></tr>\n", diff.NewDirsearchPaths, diff.RemovedDirsearchPaths)
+		fmt.Fprintf(w, "          <tr><td>Nuclei Findings</td><td>%d</td><td>%d</td></tr>\n", diff.NewNuclei, diff.ResolvedNuclei)
+		fmt.Fprintln(w, "        </tbody>")
+		fmt.Fprintln(w, "      </table>")
+		fmt.Fprintf(w, "      <p>Baseline run: <strong>%s</strong> · Diff report: <code>%s</code></p>\n", html.EscapeString(diff.BaseTimestamp), html.EscapeString(diff.ReportPath))
+		fmt.Fprintln(w, "    </section>")
+	}
 	fmt.Fprintln(w, "  </div>")
 	fmt.Fprintln(w, "</body>")
 	fmt.Fprintln(w, "</html>")
 	return nil
 }
 
-func writeMasterReport(path string, cfg config, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir string, subdomainCount, liveCount, urlCount, dirsearchCount, nucleiCount int) error {
+func writeMasterReport(path string, cfg config, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir string, subdomainCount, liveCount, urlCount, dirsearchCount, nucleiCount int, diff *diffSummary) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -990,7 +1047,7 @@ QUICK ACCESS:
   Dirsearch files: %s/
   Nuclei findings: %s/nuclei_findings.txt
   Nuclei JSONL:    %s/nuclei_findings.jsonl
-
+ 
 ================================================================================
 `,
 		time.Now().Format(time.RFC1123),
@@ -1017,6 +1074,37 @@ QUICK ACCESS:
 		nucleiDir,
 		nucleiDir,
 	)
+	if err != nil {
+		return err
+	}
+	if diff != nil {
+		_, err = fmt.Fprintf(f, `
+DIFF MODE:
+--------------------------------------------------------------------------------
+  Baseline timestamp: %s
+  Diff report:        %s
+  Changes:
+    Subdomains       +%d  -%d
+    Live hosts       +%d  -%d
+    URLs             +%d  -%d
+    Dirsearch paths  +%d  -%d
+    Nuclei findings  +%d  -%d
+  Alert candidates:
+    New high/critical nuclei findings: %d
+    New high-risk paths: %d
+================================================================================
+`,
+			diff.BaseTimestamp,
+			diff.ReportPath,
+			diff.NewSubdomains, diff.RemovedSubdomains,
+			diff.NewLiveHosts, diff.RemovedLiveHosts,
+			diff.NewURLs, diff.RemovedURLs,
+			diff.NewDirsearchPaths, diff.RemovedDirsearchPaths,
+			diff.NewNuclei, diff.ResolvedNuclei,
+			len(diff.NewHighCriticalFindings),
+			len(diff.NewHighRiskPaths),
+		)
+	}
 	return err
 }
 
@@ -1049,6 +1137,279 @@ func readNonEmptyLines(path string) ([]string, error) {
 		}
 	}
 	return lines, sc.Err()
+}
+
+func toSet(lines []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		v := strings.TrimSpace(line)
+		if v != "" {
+			out[v] = struct{}{}
+		}
+	}
+	return out
+}
+
+func diffSets(current, previous map[string]struct{}) (added, removed []string) {
+	for item := range current {
+		if _, ok := previous[item]; !ok {
+			added = append(added, item)
+		}
+	}
+	for item := range previous {
+		if _, ok := current[item]; !ok {
+			removed = append(removed, item)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
+func listMasterTimestamps(outputDir string) ([]string, error) {
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return nil, err
+	}
+	const prefix = "master_report_"
+	const suffix = ".txt"
+	timestamps := make([]string, 0, 32)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		ts := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		if regexp.MustCompile(`^\d{8}_\d{6}$`).MatchString(ts) {
+			timestamps = append(timestamps, ts)
+		}
+	}
+	sort.Strings(timestamps)
+	return timestamps, nil
+}
+
+func previousTimestamp(outputDir, currentTimestamp, requestedBase string) (string, error) {
+	if requestedBase != "" {
+		return requestedBase, nil
+	}
+	timestamps, err := listMasterTimestamps(outputDir)
+	if err != nil {
+		return "", err
+	}
+	prev := ""
+	for _, ts := range timestamps {
+		if ts < currentTimestamp {
+			prev = ts
+		}
+	}
+	return prev, nil
+}
+
+func readAllDirsearchPaths(dir string) (map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return out, nil
+		}
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_dirsearch.txt") {
+			continue
+		}
+		lines, err := readNonEmptyLines(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range lines {
+			out[line] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+func findingKey(f nucleiFinding) string {
+	return strings.ToLower(strings.TrimSpace(f.Severity)) + "|" + strings.TrimSpace(f.TemplateID) + "|" + strings.TrimSpace(f.MatchedAt)
+}
+
+func findHighRiskPaths(paths []string) []string {
+	re := regexp.MustCompile(`(?i)(admin|login|config|backup|\.env|\.git|phpinfo|db|debug|dashboard|secret|token)`)
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if re.MatchString(p) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func writeDiffReport(path string, d diffSummary) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(f, `================================================================================
+                        DIFFERENTIAL RECON REPORT
+================================================================================
+Current Run Timestamp: %s
+Baseline Timestamp:    %s
+================================================================================
+CHANGES:
+--------------------------------------------------------------------------------
+  Subdomains       +%d  -%d
+  Live hosts       +%d  -%d
+  URLs             +%d  -%d
+  Dirsearch paths  +%d  -%d
+  Nuclei findings  +%d  -%d
+
+ALERT CANDIDATES:
+--------------------------------------------------------------------------------
+  New high/critical nuclei findings: %d
+  New high-risk paths: %d
+================================================================================
+`, d.CurrentTimestamp, d.BaseTimestamp,
+		d.NewSubdomains, d.RemovedSubdomains,
+		d.NewLiveHosts, d.RemovedLiveHosts,
+		d.NewURLs, d.RemovedURLs,
+		d.NewDirsearchPaths, d.RemovedDirsearchPaths,
+		d.NewNuclei, d.ResolvedNuclei,
+		len(d.NewHighCriticalFindings), len(d.NewHighRiskPaths))
+	return err
+}
+
+func buildDiffSummary(cfg config, subfinderOut, liveHostsPath string, allURLs []string, dirsearchDir, nucleiJSONLPath string) (*diffSummary, error) {
+	baseTS, err := previousTimestamp(cfg.outputDir, cfg.timestamp, cfg.diffBase)
+	if err != nil {
+		return nil, err
+	}
+	if baseTS == "" {
+		return nil, nil
+	}
+
+	currSubdomains, err := readNonEmptyLines(subfinderOut)
+	if err != nil {
+		return nil, err
+	}
+	prevSubdomains, err := readNonEmptyLines(filepath.Join(cfg.outputDir, "subfinder_"+baseTS, "subdomains.txt"))
+	if err != nil {
+		return nil, err
+	}
+	currLive, err := readNonEmptyLines(liveHostsPath)
+	if err != nil {
+		return nil, err
+	}
+	prevLive, err := readNonEmptyLines(filepath.Join(cfg.outputDir, "httpx_"+baseTS, "live_hosts.txt"))
+	if err != nil {
+		return nil, err
+	}
+	prevURLs, err := readNonEmptyLines(filepath.Join(cfg.outputDir, "katana_"+baseTS, "all_urls.txt"))
+	if err != nil {
+		return nil, err
+	}
+
+	currDirsearch, err := readAllDirsearchPaths(dirsearchDir)
+	if err != nil {
+		return nil, err
+	}
+	prevDirsearch, err := readAllDirsearchPaths(filepath.Join(cfg.outputDir, "dirsearch_"+baseTS))
+	if err != nil {
+		return nil, err
+	}
+
+	_, currNuclei, err := parseNucleiFindings(nucleiJSONLPath)
+	if err != nil {
+		return nil, err
+	}
+	_, prevNuclei, err := parseNucleiFindings(filepath.Join(cfg.outputDir, "nuclei_"+baseTS, "nuclei_findings.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+
+	addedSubdomains, removedSubdomains := diffSets(toSet(currSubdomains), toSet(prevSubdomains))
+	addedLive, removedLive := diffSets(toSet(currLive), toSet(prevLive))
+	addedURLs, removedURLs := diffSets(toSet(allURLs), toSet(prevURLs))
+	addedDirsearch, removedDirsearch := diffSets(currDirsearch, prevDirsearch)
+
+	currNSet := make(map[string]nucleiFinding, len(currNuclei))
+	for _, f := range currNuclei {
+		currNSet[findingKey(f)] = f
+	}
+	prevNSet := make(map[string]nucleiFinding, len(prevNuclei))
+	for _, f := range prevNuclei {
+		prevNSet[findingKey(f)] = f
+	}
+	currNKeys := make(map[string]struct{}, len(currNSet))
+	prevNKeys := make(map[string]struct{}, len(prevNSet))
+	for k := range currNSet {
+		currNKeys[k] = struct{}{}
+	}
+	for k := range prevNSet {
+		prevNKeys[k] = struct{}{}
+	}
+	addedNucleiKeys, removedNucleiKeys := diffSets(currNKeys, prevNKeys)
+
+	newHighCritical := make([]nucleiFinding, 0, len(addedNucleiKeys))
+	for _, key := range addedNucleiKeys {
+		f := currNSet[key]
+		sev := strings.ToLower(strings.TrimSpace(f.Severity))
+		if sev == "high" || sev == "critical" {
+			newHighCritical = append(newHighCritical, f)
+		}
+	}
+
+	diff := &diffSummary{
+		CurrentTimestamp:        cfg.timestamp,
+		BaseTimestamp:           baseTS,
+		ReportPath:              filepath.Join(cfg.outputDir, "diff_report_"+cfg.timestamp+".txt"),
+		NewSubdomains:           len(addedSubdomains),
+		RemovedSubdomains:       len(removedSubdomains),
+		NewLiveHosts:            len(addedLive),
+		RemovedLiveHosts:        len(removedLive),
+		NewURLs:                 len(addedURLs),
+		RemovedURLs:             len(removedURLs),
+		NewDirsearchPaths:       len(addedDirsearch),
+		RemovedDirsearchPaths:   len(removedDirsearch),
+		NewNuclei:               len(addedNucleiKeys),
+		ResolvedNuclei:          len(removedNucleiKeys),
+		NewHighCriticalFindings: newHighCritical,
+		NewHighRiskPaths:        findHighRiskPaths(addedDirsearch),
+	}
+	if err := writeDiffReport(diff.ReportPath, *diff); err != nil {
+		return nil, err
+	}
+	return diff, nil
+}
+
+func sendWebhookAlert(webhookURL string, diff *diffSummary) error {
+	if webhookURL == "" || diff == nil {
+		return nil
+	}
+	if len(diff.NewHighCriticalFindings) == 0 && len(diff.NewHighRiskPaths) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("webrecon diff alert (baseline %s): new high/critical nuclei=%d, new high-risk paths=%d", diff.BaseTimestamp, len(diff.NewHighCriticalFindings), len(diff.NewHighRiskPaths))
+	body, err := json.Marshal(map[string]string{"text": msg})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook returned status %s", resp.Status)
+	}
+	return nil
 }
 
 func runPipeline(cfg config) error {
@@ -1158,15 +1519,43 @@ func runPipeline(cfg config) error {
 	nucleiTotal := totalNucleiFindings(nucleiCounts)
 	success(fmt.Sprintf("Nuclei completed: %d findings", nucleiTotal))
 
+	var diff *diffSummary
+	if cfg.diffMode {
+		status("Running diff mode against baseline...")
+		diff, err = buildDiffSummary(
+			cfg,
+			subfinderOut,
+			liveHosts,
+			allURLs,
+			dirsearchDir,
+			filepath.Join(nucleiDir, "nuclei_findings.jsonl"),
+		)
+		if err != nil {
+			return err
+		}
+		if diff == nil {
+			warn("No previous baseline run found for diff mode.")
+		} else {
+			success(fmt.Sprintf("Diff completed against baseline %s", diff.BaseTimestamp))
+			success(fmt.Sprintf("Diff report generated: %s", diff.ReportPath))
+		}
+		if err := sendWebhookAlert(cfg.webhookURL, diff); err != nil {
+			return err
+		}
+		if cfg.webhookURL != "" && diff != nil {
+			success("Webhook alert delivered")
+		}
+	}
+
 	readable := filepath.Join(katanaDir, "readable_summary.html")
 	status("Generating human-readable summary...")
-	if err := writeReadableSummary(readable, cfg, httpxEntries, hostCounts, allURLs, dirsearchCounts, nucleiCounts, nucleiFindings); err != nil {
+	if err := writeReadableSummary(readable, cfg, httpxEntries, hostCounts, allURLs, dirsearchCounts, nucleiCounts, nucleiFindings, diff); err != nil {
 		return err
 	}
 	success(fmt.Sprintf("Readable summary generated: %s", readable))
 
 	master := filepath.Join(cfg.outputDir, "master_report_"+cfg.timestamp+".txt")
-	if err := writeMasterReport(master, cfg, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, subCount, len(httpxEntries), len(allURLs), dirsearchTotal, nucleiTotal); err != nil {
+	if err := writeMasterReport(master, cfg, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, subCount, len(httpxEntries), len(allURLs), dirsearchTotal, nucleiTotal, diff); err != nil {
 		return err
 	}
 	success(fmt.Sprintf("Master report generated: %s", master))
@@ -1180,6 +1569,9 @@ func runPipeline(cfg config) error {
 	fmt.Fprintf(getOutputWriter(), "  URLs found: %d\n", len(allURLs))
 	fmt.Fprintf(getOutputWriter(), "  Dirsearch paths: %d\n", dirsearchTotal)
 	fmt.Fprintf(getOutputWriter(), "  Nuclei findings: %d\n", nucleiTotal)
+	if diff != nil {
+		fmt.Fprintf(getOutputWriter(), "  Diff baseline: %s\n", diff.BaseTimestamp)
+	}
 	fmt.Fprintln(getOutputWriter(), "========================================================================")
 
 	return nil
@@ -1232,6 +1624,9 @@ a{color:#2563eb;text-decoration:none}
 <label>Output directory</label><input name="output_dir" value="recon_results">
 <label>Profile</label><select name="profile"><option>quick</option><option selected>standard</option><option>deep</option></select>
 <label>Nuclei severities (comma-separated)</label><input name="nuclei_severity" value="medium,high,critical">
+<label>Enable diff mode</label><select name="diff_mode"><option value="false" selected>No</option><option value="true">Yes</option></select>
+<label>Diff baseline timestamp (optional)</label><input name="diff_base" placeholder="20260513_010203">
+<label>Webhook URL for diff alerts (optional)</label><input name="webhook_url" placeholder="https://hooks.slack.com/services/...">
 <button type="submit">Run Scan</button></form></div>
 <div class="box"><h3>Live Logs</h3><pre id="log">No logs yet.</pre></div>
 <div class="box"><h3>Artifacts</h3><div id="artifacts">No artifacts yet.</div></div>
@@ -1284,6 +1679,13 @@ func handleWebStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := strings.TrimSpace(r.FormValue("nuclei_severity")); v != "" {
 		cfg.nucleiSeverity = v
+	}
+	cfg.diffMode = strings.EqualFold(strings.TrimSpace(r.FormValue("diff_mode")), "true")
+	if v := strings.TrimSpace(r.FormValue("diff_base")); v != "" {
+		cfg.diffBase = v
+	}
+	if v := strings.TrimSpace(r.FormValue("webhook_url")); v != "" {
+		cfg.webhookURL = v
 	}
 
 	if err := finalizeConfig(&cfg, true); err != nil {
