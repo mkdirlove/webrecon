@@ -147,6 +147,21 @@ Web UI includes:
 - live log streaming
 - artifact links (master report + readable HTML report)
 
+### Go GUI launcher app
+
+A Go-based GUI launcher is available at `cmd/webrecon-gui`. It starts webrecon in web mode and opens your browser automatically.
+
+```bash
+cd cmd/webrecon-gui
+go run . --binary ../../webrecon --addr 127.0.0.1:8080
+```
+
+Optional flags:
+
+- `--no-open` to skip auto-opening the browser
+- `--binary` to point to a custom `webrecon` binary
+- `--addr` to change the web UI bind address
+
 ## 7. Output structure
 
 Each scan creates timestamped directories:
