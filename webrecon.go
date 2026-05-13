@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -52,8 +54,13 @@ type config struct {
 	httpxTimeout       int
 	katanaDepth        int
 	katanaWorkers      int
+	dirsearchWorkers   int
 	dirsearchThreads   int
+	dirsearchTimeout   int
 	dirsearchRecursive bool
+	screenshotEnabled  bool
+	screenshotWorkers  int
+	screenshotTimeout  int
 	timestamp          string
 }
 
@@ -97,6 +104,10 @@ type diffSummary struct {
 	RemovedDirsearchPaths   int
 	NewNuclei               int
 	ResolvedNuclei          int
+	NewScreenshots          int
+	RemovedScreenshots      int
+	ChangedScreenshots      int
+	ChangedScreenshotNames  []string
 	NewHighCriticalFindings []nucleiFinding
 	NewHighRiskPaths        []string
 }
@@ -197,6 +208,9 @@ Options:
     --sqlmap-level N            SQLMap test level (default: 1)
     --sqlmap-risk N             SQLMap risk (default: 1)
     --sqlmap-threads N          SQLMap threads (default: 2)
+    --no-screenshot             Disable screenshot capture stage
+    --screenshot-workers N      Screenshot workers (default: 4)
+    --screenshot-timeout N      Screenshot timeout seconds (default: 20)
     --diff                      Compare current run with previous run
     --diff-base TS              Use specific baseline timestamp (YYYYMMDD_HHMMSS)
     --webhook-url URL           Send diff alerts to webhook URL
@@ -206,7 +220,9 @@ Options:
     -rl, --rate-limit NUM       Rate limit for httpx (default: 150)
     -kd, --katana-depth NUM     Crawl depth for katana (default: 3)
     -kw, --katana-workers NUM   Parallel katana workers (default: CPU count)
+    -dw, --dirsearch-workers N  Parallel dirsearch workers (default: 4)
     -dt, --dirsearch-threads N  Dirsearch threads per host (default: 30)
+    -dto, --dirsearch-timeout N Dirsearch timeout seconds (default: 15)
     -dr, --dirsearch-recursive  Enable recursive dirsearch
     -h, --help                  Show this help message
 
@@ -233,9 +249,12 @@ func parseArgs() config {
 	flag.StringVar(&cfg.nucleiSeverity, "ns", cfg.nucleiSeverity, "")
 	flag.StringVar(&cfg.nucleiSeverity, "nuclei-severity", cfg.nucleiSeverity, "")
 	noSQLi := flag.Bool("no-sqli", false, "")
+	noScreenshot := flag.Bool("no-screenshot", false, "")
 	flag.IntVar(&cfg.sqlmapLevel, "sqlmap-level", cfg.sqlmapLevel, "")
 	flag.IntVar(&cfg.sqlmapRisk, "sqlmap-risk", cfg.sqlmapRisk, "")
 	flag.IntVar(&cfg.sqlmapThreads, "sqlmap-threads", cfg.sqlmapThreads, "")
+	flag.IntVar(&cfg.screenshotWorkers, "screenshot-workers", cfg.screenshotWorkers, "")
+	flag.IntVar(&cfg.screenshotTimeout, "screenshot-timeout", cfg.screenshotTimeout, "")
 	flag.BoolVar(&cfg.diffMode, "diff", cfg.diffMode, "")
 	flag.StringVar(&cfg.diffBase, "diff-base", cfg.diffBase, "")
 	flag.StringVar(&cfg.webhookURL, "webhook-url", cfg.webhookURL, "")
@@ -249,8 +268,12 @@ func parseArgs() config {
 	flag.IntVar(&cfg.katanaDepth, "katana-depth", cfg.katanaDepth, "")
 	flag.IntVar(&cfg.katanaWorkers, "kw", cfg.katanaWorkers, "")
 	flag.IntVar(&cfg.katanaWorkers, "katana-workers", cfg.katanaWorkers, "")
+	flag.IntVar(&cfg.dirsearchWorkers, "dw", cfg.dirsearchWorkers, "")
+	flag.IntVar(&cfg.dirsearchWorkers, "dirsearch-workers", cfg.dirsearchWorkers, "")
 	flag.IntVar(&cfg.dirsearchThreads, "dt", cfg.dirsearchThreads, "")
 	flag.IntVar(&cfg.dirsearchThreads, "dirsearch-threads", cfg.dirsearchThreads, "")
+	flag.IntVar(&cfg.dirsearchTimeout, "dto", cfg.dirsearchTimeout, "")
+	flag.IntVar(&cfg.dirsearchTimeout, "dirsearch-timeout", cfg.dirsearchTimeout, "")
 	flag.BoolVar(&cfg.dirsearchRecursive, "dr", cfg.dirsearchRecursive, "")
 	flag.BoolVar(&cfg.dirsearchRecursive, "dirsearch-recursive", cfg.dirsearchRecursive, "")
 	help := flag.Bool("h", false, "")
@@ -262,6 +285,7 @@ func parseArgs() config {
 		os.Exit(0)
 	}
 	cfg.sqliTesting = !*noSQLi
+	cfg.screenshotEnabled = !*noScreenshot
 
 	if err := finalizeConfig(&cfg, !cfg.webMode); err != nil {
 		fatalf("%v", err)
@@ -278,6 +302,9 @@ func defaultConfig() config {
 		sqlmapLevel:        1,
 		sqlmapRisk:         1,
 		sqlmapThreads:      2,
+		screenshotEnabled:  true,
+		screenshotWorkers:  4,
+		screenshotTimeout:  20,
 		diffMode:           false,
 		diffBase:           "",
 		webhookURL:         "",
@@ -288,7 +315,9 @@ func defaultConfig() config {
 		httpxTimeout:       10,
 		katanaDepth:        3,
 		katanaWorkers:      runtime.NumCPU(),
+		dirsearchWorkers:   4,
 		dirsearchThreads:   30,
+		dirsearchTimeout:   15,
 		dirsearchRecursive: false,
 		timestamp:          time.Now().Format("20060102_150405"),
 	}
@@ -323,8 +352,14 @@ func finalizeConfig(cfg *config, requireTarget bool) error {
 		if cfg.dirsearchThreads == 30 {
 			cfg.dirsearchThreads = 15
 		}
+		if cfg.dirsearchWorkers == 4 {
+			cfg.dirsearchWorkers = 2
+		}
 		if cfg.nucleiSeverity == "medium,high,critical" {
 			cfg.nucleiSeverity = "high,critical"
+		}
+		if cfg.screenshotWorkers == 4 {
+			cfg.screenshotWorkers = 2
 		}
 	case "standard":
 	case "deep":
@@ -343,9 +378,15 @@ func finalizeConfig(cfg *config, requireTarget bool) error {
 		if cfg.dirsearchThreads == 30 {
 			cfg.dirsearchThreads = 50
 		}
+		if cfg.dirsearchWorkers == 4 {
+			cfg.dirsearchWorkers = 8
+		}
 		cfg.dirsearchRecursive = true
 		if cfg.profile == "deep" && cfg.nucleiSeverity == "medium,high,critical" {
 			cfg.nucleiSeverity = "low,medium,high,critical"
+		}
+		if cfg.screenshotWorkers == 4 {
+			cfg.screenshotWorkers = 8
 		}
 	default:
 		return fmt.Errorf("invalid profile %q (allowed: quick, standard, deep)", cfg.profile)
@@ -370,8 +411,8 @@ func finalizeConfig(cfg *config, requireTarget bool) error {
 		cfg.diffMode = true
 	}
 
-	if cfg.threads < 1 || cfg.rateLimit < 1 || cfg.katanaDepth < 1 || cfg.katanaWorkers < 1 || cfg.dirsearchThreads < 1 {
-		return errors.New("threads, rate-limit, katana-depth, katana-workers and dirsearch-threads must all be >= 1")
+	if cfg.threads < 1 || cfg.rateLimit < 1 || cfg.katanaDepth < 1 || cfg.katanaWorkers < 1 || cfg.dirsearchWorkers < 1 || cfg.dirsearchThreads < 1 || cfg.dirsearchTimeout < 1 || cfg.screenshotWorkers < 1 || cfg.screenshotTimeout < 1 {
+		return errors.New("threads, rate-limit, katana-depth, katana-workers, dirsearch-workers, dirsearch-threads, dirsearch-timeout, screenshot-workers and screenshot-timeout must all be >= 1")
 	}
 	return nil
 }
@@ -650,14 +691,61 @@ func runKatanaParallel(urls []string, outDir string, depth, workers int) (map[st
 	return hostCounts, allURLs
 }
 
-func runDirsearchParallel(urls []string, outDir string, workers, dirsearchThreads int, recursive bool) (map[string]int, int) {
+func normalizeDirsearchTargets(urls []string) []struct {
+	url  string
+	host string
+} {
+	byHost := make(map[string]string)
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		host := safeHost(u)
+		if host == "" {
+			continue
+		}
+		existing, ok := byHost[host]
+		if !ok || (strings.HasPrefix(u, "https://") && !strings.HasPrefix(existing, "https://")) {
+			byHost[host] = u
+		}
+	}
+	hosts := make([]string, 0, len(byHost))
+	for host := range byHost {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	targets := make([]struct {
+		url  string
+		host string
+	}, 0, len(hosts))
+	for _, host := range hosts {
+		targets = append(targets, struct {
+			url  string
+			host string
+		}{
+			url:  byHost[host],
+			host: host,
+		})
+	}
+	return targets
+}
+
+func runDirsearchParallel(urls []string, outDir string, workers, dirsearchThreads, timeoutSec int, recursive bool) (map[string]int, int) {
 	type job struct {
 		url  string
 		host string
 	}
+	targets := normalizeDirsearchTargets(urls)
+	if len(targets) == 0 {
+		return map[string]int{}, 0
+	}
+	if workers > len(targets) {
+		workers = len(targets)
+	}
 
 	jobs := make(chan job)
-	results := make(chan dirsearchResult, len(urls))
+	results := make(chan dirsearchResult, len(targets))
 
 	workerFn := func() {
 		for j := range jobs {
@@ -671,6 +759,7 @@ func runDirsearchParallel(urls []string, outDir string, workers, dirsearchThread
 				"--format=plain",
 				"-o", outFile,
 				"-t", strconv.Itoa(dirsearchThreads),
+				"--timeout", strconv.Itoa(timeoutSec),
 			}
 			if recursive {
 				args = append(args, "-r")
@@ -689,21 +778,16 @@ func runDirsearchParallel(urls []string, outDir string, workers, dirsearchThread
 	}
 
 	go func() {
-		for _, raw := range urls {
-			u := strings.TrimSpace(raw)
-			if u == "" {
-				continue
-			}
-			host := safeHost(u)
-			status(fmt.Sprintf("Dirsearch: %s", u))
-			jobs <- job{url: u, host: host}
+		for _, t := range targets {
+			status(fmt.Sprintf("Dirsearch: %s", t.url))
+			jobs <- job{url: t.url, host: t.host}
 		}
 		close(jobs)
 	}()
 
-	hostCounts := make(map[string]int, len(urls))
+	hostCounts := make(map[string]int, len(targets))
 	total := 0
-	for i := 0; i < len(urls); i++ {
+	for i := 0; i < len(targets); i++ {
 		r := <-results
 		if r.err != nil {
 			warn(fmt.Sprintf("Dirsearch encountered issues with %s", r.host))
@@ -802,6 +886,83 @@ func runNuclei(liveHostsPath, outDir string, cfg config) (map[string]int, []nucl
 	return parseNucleiFindings(outJSONL)
 }
 
+func runScreenshotCapture(liveHostsPath, outDir string, workers, timeoutSec int) (int, error) {
+	if countLines(liveHostsPath) == 0 {
+		return 0, nil
+	}
+	if _, err := resolveTool("gowitness"); err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return 0, err
+	}
+
+	cmd := commandForTool("gowitness",
+		"scan", "file",
+		"-f", liveHostsPath,
+		"--screenshot-path", outDir,
+		"--threads", strconv.Itoa(workers),
+		"--timeout", strconv.Itoa(timeoutSec),
+	)
+	cmd.Stdout = getOutputWriter()
+	cmd.Stderr = getOutputWriter()
+	if err := cmd.Run(); err != nil {
+		return 0, err
+	}
+
+	manifest, err := readScreenshotManifest(outDir)
+	if err != nil {
+		return 0, err
+	}
+	return len(manifest), nil
+}
+
+func readScreenshotManifest(dir string) (map[string]string, error) {
+	out := make(map[string]string)
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		sum, err := sha256File(path)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = sum
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return out, nil
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
 func truncate(s string, n int) string {
 	r := []rune(strings.TrimSpace(s))
 	if len(r) <= n {
@@ -810,7 +971,7 @@ func truncate(s string, n int) string {
 	return string(r[:n])
 }
 
-func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCounts map[string]int, allURLs []string, dirsearchCounts map[string]int, nucleiCounts map[string]int, nucleiFindings []nucleiFinding, diff *diffSummary) error {
+func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCounts map[string]int, allURLs []string, dirsearchCounts map[string]int, nucleiCounts map[string]int, nucleiFindings []nucleiFinding, screenshotDir string, screenshotCount int, diff *diffSummary) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -889,8 +1050,14 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 		return t
 	}())
 	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Nuclei Findings</div><div class=\"v\">%d</div></div>\n", totalNuclei)
+	fmt.Fprintf(w, "        <div class=\"card\"><div class=\"k\">Screenshots</div><div class=\"v\">%d</div></div>\n", screenshotCount)
 	fmt.Fprintln(w, "      </div>")
 	fmt.Fprintln(w, "    </div>")
+	fmt.Fprintln(w, "    <section>")
+	fmt.Fprintln(w, "      <h2>Visual Snapshot Capture</h2>")
+	fmt.Fprintf(w, "      <p>Screenshots captured: <strong>%d</strong></p>\n", screenshotCount)
+	fmt.Fprintf(w, "      <p>Screenshot directory: <code>%s</code></p>\n", html.EscapeString(screenshotDir))
+	fmt.Fprintln(w, "    </section>")
 	fmt.Fprintln(w, "    <section>")
 	fmt.Fprintln(w, "      <h2>Live Hosts Summary</h2>")
 	fmt.Fprintln(w, "      <table>")
@@ -1007,8 +1174,21 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 		fmt.Fprintf(w, "          <tr><td>URLs</td><td>%d</td><td>%d</td></tr>\n", diff.NewURLs, diff.RemovedURLs)
 		fmt.Fprintf(w, "          <tr><td>Dirsearch Paths</td><td>%d</td><td>%d</td></tr>\n", diff.NewDirsearchPaths, diff.RemovedDirsearchPaths)
 		fmt.Fprintf(w, "          <tr><td>Nuclei Findings</td><td>%d</td><td>%d</td></tr>\n", diff.NewNuclei, diff.ResolvedNuclei)
+		fmt.Fprintf(w, "          <tr><td>Screenshots</td><td>%d</td><td>%d</td></tr>\n", diff.NewScreenshots, diff.RemovedScreenshots)
 		fmt.Fprintln(w, "        </tbody>")
 		fmt.Fprintln(w, "      </table>")
+		fmt.Fprintf(w, "      <p>Changed screenshot files: <strong>%d</strong></p>\n", diff.ChangedScreenshots)
+		if len(diff.ChangedScreenshotNames) > 0 {
+			fmt.Fprintln(w, "      <ul>")
+			limit := 10
+			if len(diff.ChangedScreenshotNames) < limit {
+				limit = len(diff.ChangedScreenshotNames)
+			}
+			for i := 0; i < limit; i++ {
+				fmt.Fprintf(w, "        <li><code>%s</code></li>\n", html.EscapeString(diff.ChangedScreenshotNames[i]))
+			}
+			fmt.Fprintln(w, "      </ul>")
+		}
 		fmt.Fprintf(w, "      <p>Baseline run: <strong>%s</strong> · Diff report: <code>%s</code></p>\n", html.EscapeString(diff.BaseTimestamp), html.EscapeString(diff.ReportPath))
 		fmt.Fprintln(w, "    </section>")
 	}
@@ -1018,7 +1198,7 @@ func writeReadableSummary(path string, cfg config, entries []httpxEntry, hostCou
 	return nil
 }
 
-func writeMasterReport(path string, cfg config, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir string, subdomainCount, liveCount, urlCount, dirsearchCount, nucleiCount int, diff *diffSummary) error {
+func writeMasterReport(path string, cfg config, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, screenshotDir string, subdomainCount, liveCount, urlCount, dirsearchCount, nucleiCount, screenshotCount int, diff *diffSummary) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -1056,6 +1236,8 @@ FILE STRUCTURE:
 └── nuclei_%s/
     ├── nuclei_findings.txt
     └── nuclei_findings.jsonl
+└── screenshots_%s/
+    └── [captured screenshots]
 
 STATISTICS:
 --------------------------------------------------------------------------------
@@ -1064,6 +1246,7 @@ STATISTICS:
   - Total URLs crawled: %d
   - Total dirsearch paths found: %d
   - Total nuclei findings: %d
+  - Total screenshots captured: %d
 
 QUICK ACCESS:
 --------------------------------------------------------------------------------
@@ -1075,6 +1258,7 @@ QUICK ACCESS:
   Dirsearch files: %s/
   Nuclei findings: %s/nuclei_findings.txt
   Nuclei JSONL:    %s/nuclei_findings.jsonl
+  Screenshots:     %s/
  
 ================================================================================
 `,
@@ -1088,11 +1272,13 @@ QUICK ACCESS:
 		cfg.timestamp,
 		cfg.timestamp,
 		cfg.timestamp,
+		cfg.timestamp,
 		subdomainCount,
 		liveCount,
 		urlCount,
 		dirsearchCount,
 		nucleiCount,
+		screenshotCount,
 		subfinderDir,
 		httpxDir,
 		httpxDir,
@@ -1101,6 +1287,7 @@ QUICK ACCESS:
 		dirsearchDir,
 		nucleiDir,
 		nucleiDir,
+		screenshotDir,
 	)
 	if err != nil {
 		return err
@@ -1117,6 +1304,8 @@ DIFF MODE:
     URLs             +%d  -%d
     Dirsearch paths  +%d  -%d
     Nuclei findings  +%d  -%d
+    Screenshots      +%d  -%d
+    Changed screenshots: %d
   Alert candidates:
     New high/critical nuclei findings: %d
     New high-risk paths: %d
@@ -1129,6 +1318,8 @@ DIFF MODE:
 			diff.NewURLs, diff.RemovedURLs,
 			diff.NewDirsearchPaths, diff.RemovedDirsearchPaths,
 			diff.NewNuclei, diff.ResolvedNuclei,
+			diff.NewScreenshots, diff.RemovedScreenshots,
+			diff.ChangedScreenshots,
 			len(diff.NewHighCriticalFindings),
 			len(diff.NewHighRiskPaths),
 		)
@@ -1283,6 +1474,28 @@ func diffSets(current, previous map[string]struct{}) (added, removed []string) {
 	return added, removed
 }
 
+func diffScreenshotManifests(current, previous map[string]string) (added, removed, changed []string) {
+	for name, hash := range current {
+		prevHash, ok := previous[name]
+		if !ok {
+			added = append(added, name)
+			continue
+		}
+		if prevHash != hash {
+			changed = append(changed, name)
+		}
+	}
+	for name := range previous {
+		if _, ok := current[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
+	return added, removed, changed
+}
+
 func listMasterTimestamps(outputDir string) ([]string, error) {
 	entries, err := os.ReadDir(outputDir)
 	if err != nil {
@@ -1381,6 +1594,8 @@ CHANGES:
   URLs             +%d  -%d
   Dirsearch paths  +%d  -%d
   Nuclei findings  +%d  -%d
+  Screenshots      +%d  -%d
+  Changed shots    %d
 
 ALERT CANDIDATES:
 --------------------------------------------------------------------------------
@@ -1393,11 +1608,13 @@ ALERT CANDIDATES:
 		d.NewURLs, d.RemovedURLs,
 		d.NewDirsearchPaths, d.RemovedDirsearchPaths,
 		d.NewNuclei, d.ResolvedNuclei,
+		d.NewScreenshots, d.RemovedScreenshots,
+		d.ChangedScreenshots,
 		len(d.NewHighCriticalFindings), len(d.NewHighRiskPaths))
 	return err
 }
 
-func buildDiffSummary(cfg config, subfinderOut, liveHostsPath string, allURLs []string, dirsearchDir, nucleiJSONLPath string) (*diffSummary, error) {
+func buildDiffSummary(cfg config, subfinderOut, liveHostsPath string, allURLs []string, dirsearchDir, nucleiJSONLPath, screenshotDir string) (*diffSummary, error) {
 	baseTS, err := previousTimestamp(cfg.outputDir, cfg.timestamp, cfg.diffBase)
 	if err != nil {
 		return nil, err
@@ -1444,11 +1661,20 @@ func buildDiffSummary(cfg config, subfinderOut, liveHostsPath string, allURLs []
 	if err != nil {
 		return nil, err
 	}
+	currScreenshots, err := readScreenshotManifest(screenshotDir)
+	if err != nil {
+		return nil, err
+	}
+	prevScreenshots, err := readScreenshotManifest(filepath.Join(cfg.outputDir, "screenshots_"+baseTS))
+	if err != nil {
+		return nil, err
+	}
 
 	addedSubdomains, removedSubdomains := diffSets(toSet(currSubdomains), toSet(prevSubdomains))
 	addedLive, removedLive := diffSets(toSet(currLive), toSet(prevLive))
 	addedURLs, removedURLs := diffSets(toSet(allURLs), toSet(prevURLs))
 	addedDirsearch, removedDirsearch := diffSets(currDirsearch, prevDirsearch)
+	addedScreenshots, removedScreenshots, changedScreenshots := diffScreenshotManifests(currScreenshots, prevScreenshots)
 
 	currNSet := make(map[string]nucleiFinding, len(currNuclei))
 	for _, f := range currNuclei {
@@ -1491,6 +1717,10 @@ func buildDiffSummary(cfg config, subfinderOut, liveHostsPath string, allURLs []
 		RemovedDirsearchPaths:   len(removedDirsearch),
 		NewNuclei:               len(addedNucleiKeys),
 		ResolvedNuclei:          len(removedNucleiKeys),
+		NewScreenshots:          len(addedScreenshots),
+		RemovedScreenshots:      len(removedScreenshots),
+		ChangedScreenshots:      len(changedScreenshots),
+		ChangedScreenshotNames:  changedScreenshots,
 		NewHighCriticalFindings: newHighCritical,
 		NewHighRiskPaths:        findHighRiskPaths(addedDirsearch),
 	}
@@ -1504,10 +1734,16 @@ func sendWebhookAlert(webhookURL string, diff *diffSummary) error {
 	if webhookURL == "" || diff == nil {
 		return nil
 	}
-	if len(diff.NewHighCriticalFindings) == 0 && len(diff.NewHighRiskPaths) == 0 {
+	if len(diff.NewHighCriticalFindings) == 0 && len(diff.NewHighRiskPaths) == 0 && diff.ChangedScreenshots == 0 {
 		return nil
 	}
-	msg := fmt.Sprintf("webrecon diff alert (baseline %s): new high/critical nuclei=%d, new high-risk paths=%d", diff.BaseTimestamp, len(diff.NewHighCriticalFindings), len(diff.NewHighRiskPaths))
+	msg := fmt.Sprintf(
+		"webrecon diff alert (baseline %s): new high/critical nuclei=%d, new high-risk paths=%d, changed screenshots=%d",
+		diff.BaseTimestamp,
+		len(diff.NewHighCriticalFindings),
+		len(diff.NewHighRiskPaths),
+		diff.ChangedScreenshots,
+	)
 	body, err := json.Marshal(map[string]string{"text": msg})
 	if err != nil {
 		return err
@@ -1531,7 +1767,11 @@ func sendWebhookAlert(webhookURL string, diff *diffSummary) error {
 
 func runPipeline(cfg config) error {
 	status("Checking required tools...")
-	for _, tool := range []string{"subfinder", "httpx", "katana", "dirsearch", "nuclei"} {
+	tools := []string{"subfinder", "httpx", "katana", "dirsearch", "nuclei"}
+	if cfg.screenshotEnabled {
+		tools = append(tools, "gowitness")
+	}
+	for _, tool := range tools {
 		if err := mustTool(tool); err != nil {
 			return err
 		}
@@ -1549,7 +1789,8 @@ func runPipeline(cfg config) error {
 	katanaDir := filepath.Join(cfg.outputDir, "katana_"+cfg.timestamp)
 	dirsearchDir := filepath.Join(cfg.outputDir, "dirsearch_"+cfg.timestamp)
 	nucleiDir := filepath.Join(cfg.outputDir, "nuclei_"+cfg.timestamp)
-	for _, dir := range []string{subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir} {
+	screenshotDir := filepath.Join(cfg.outputDir, "screenshots_"+cfg.timestamp)
+	for _, dir := range []string{subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, screenshotDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -1607,6 +1848,15 @@ func runPipeline(cfg config) error {
 		warn("No live hosts found. Exiting.")
 		return nil
 	}
+	screenshotCount := 0
+	if cfg.screenshotEnabled {
+		status("Running screenshot capture on live hosts...")
+		screenshotCount, err = runScreenshotCapture(liveHosts, screenshotDir, cfg.screenshotWorkers, cfg.screenshotTimeout)
+		if err != nil {
+			return err
+		}
+		success(fmt.Sprintf("Screenshot capture completed: %d screenshots", screenshotCount))
+	}
 
 	status("Running Katana on live hosts (parallel)...")
 	urls, err := readNonEmptyLines(liveHosts)
@@ -1625,7 +1875,7 @@ func runPipeline(cfg config) error {
 	success(fmt.Sprintf("Katana completed: %d total URLs discovered", len(allURLs)))
 
 	status("Running Dirsearch on live hosts (parallel)...")
-	dirsearchCounts, dirsearchTotal := runDirsearchParallel(urls, dirsearchDir, cfg.katanaWorkers, cfg.dirsearchThreads, cfg.dirsearchRecursive)
+	dirsearchCounts, dirsearchTotal := runDirsearchParallel(urls, dirsearchDir, cfg.dirsearchWorkers, cfg.dirsearchThreads, cfg.dirsearchTimeout, cfg.dirsearchRecursive)
 	success(fmt.Sprintf("Dirsearch completed: %d total paths discovered", dirsearchTotal))
 
 	status("Running Nuclei on live hosts...")
@@ -1646,6 +1896,7 @@ func runPipeline(cfg config) error {
 			allURLs,
 			dirsearchDir,
 			filepath.Join(nucleiDir, "nuclei_findings.jsonl"),
+			screenshotDir,
 		)
 		if err != nil {
 			return err
@@ -1666,13 +1917,13 @@ func runPipeline(cfg config) error {
 
 	readable := filepath.Join(katanaDir, "readable_summary.html")
 	status("Generating human-readable summary...")
-	if err := writeReadableSummary(readable, cfg, httpxEntries, hostCounts, allURLs, dirsearchCounts, nucleiCounts, nucleiFindings, diff); err != nil {
+	if err := writeReadableSummary(readable, cfg, httpxEntries, hostCounts, allURLs, dirsearchCounts, nucleiCounts, nucleiFindings, screenshotDir, screenshotCount, diff); err != nil {
 		return err
 	}
 	success(fmt.Sprintf("Readable summary generated: %s", readable))
 
 	master := filepath.Join(cfg.outputDir, "master_report_"+cfg.timestamp+".txt")
-	if err := writeMasterReport(master, cfg, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, subCount, len(httpxEntries), len(allURLs), dirsearchTotal, nucleiTotal, diff); err != nil {
+	if err := writeMasterReport(master, cfg, subfinderDir, httpxDir, katanaDir, dirsearchDir, nucleiDir, screenshotDir, subCount, len(httpxEntries), len(allURLs), dirsearchTotal, nucleiTotal, screenshotCount, diff); err != nil {
 		return err
 	}
 	success(fmt.Sprintf("Master report generated: %s", master))
@@ -1686,6 +1937,7 @@ func runPipeline(cfg config) error {
 	fmt.Fprintf(getOutputWriter(), "  URLs found: %d\n", len(allURLs))
 	fmt.Fprintf(getOutputWriter(), "  Dirsearch paths: %d\n", dirsearchTotal)
 	fmt.Fprintf(getOutputWriter(), "  Nuclei findings: %d\n", nucleiTotal)
+	fmt.Fprintf(getOutputWriter(), "  Screenshots: %d\n", screenshotCount)
 	if diff != nil {
 		fmt.Fprintf(getOutputWriter(), "  Diff baseline: %s\n", diff.BaseTimestamp)
 	}
@@ -1741,6 +1993,9 @@ a{color:#2563eb;text-decoration:none}
 <label>Output directory</label><input name="output_dir" value="recon_results">
 <label>Profile</label><select name="profile"><option>quick</option><option selected>standard</option><option>deep</option></select>
 <label>Nuclei severities (comma-separated)</label><input name="nuclei_severity" value="medium,high,critical">
+<label>Enable screenshot capture</label><select name="screenshot_enabled"><option value="true" selected>Yes</option><option value="false">No</option></select>
+<label>Screenshot workers</label><input name="screenshot_workers" value="4">
+<label>Screenshot timeout seconds</label><input name="screenshot_timeout" value="20">
 <label>Enable diff mode</label><select name="diff_mode"><option value="false" selected>No</option><option value="true">Yes</option></select>
 <label>Diff baseline timestamp (optional)</label><input name="diff_base" placeholder="20260513_010203">
 <label>Webhook URL for diff alerts (optional)</label><input name="webhook_url" placeholder="https://hooks.slack.com/services/...">
@@ -1796,6 +2051,25 @@ func handleWebStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := strings.TrimSpace(r.FormValue("nuclei_severity")); v != "" {
 		cfg.nucleiSeverity = v
+	}
+	cfg.screenshotEnabled = !strings.EqualFold(strings.TrimSpace(r.FormValue("screenshot_enabled")), "false")
+	if v := strings.TrimSpace(r.FormValue("screenshot_workers")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			appState.mu.Unlock()
+			http.Error(w, "invalid screenshot_workers", http.StatusBadRequest)
+			return
+		}
+		cfg.screenshotWorkers = n
+	}
+	if v := strings.TrimSpace(r.FormValue("screenshot_timeout")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			appState.mu.Unlock()
+			http.Error(w, "invalid screenshot_timeout", http.StatusBadRequest)
+			return
+		}
+		cfg.screenshotTimeout = n
 	}
 	cfg.diffMode = strings.EqualFold(strings.TrimSpace(r.FormValue("diff_mode")), "true")
 	if v := strings.TrimSpace(r.FormValue("diff_base")); v != "" {

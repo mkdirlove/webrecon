@@ -6,6 +6,7 @@ Automated reconnaissance pipeline with:
 - live host probing (`httpx`)
 - crawling (`katana`)
 - content/path discovery (`dirsearch`)
+- visual snapshots (`gowitness`)
 - vulnerability scanning (`nuclei`)
 - differential change tracking (`diff mode`)
 - webhook alerts for high-signal new findings
@@ -21,6 +22,7 @@ Install these tools and make sure they are in `PATH`:
 - `katana`
 - `dirsearch`
 - `nuclei`
+- `gowitness`
 - `go` (required when using `webrecon.sh` wrapper)
 
 Example installs (Go-based tools):
@@ -61,6 +63,9 @@ Options:
     -o, --output DIR            Output directory (default: recon_results)
     -p, --profile PROFILE       Scan profile: quick|standard|deep (default: standard)
     -ns, --nuclei-severity S    Nuclei severities (comma-separated)
+    --no-screenshot             Disable screenshot capture stage
+    --screenshot-workers N      Screenshot workers (default: 4)
+    --screenshot-timeout N      Screenshot timeout seconds (default: 20)
     --diff                      Compare current run with previous run
     --diff-base TS              Use specific baseline timestamp (YYYYMMDD_HHMMSS)
     --webhook-url URL           Send diff alerts to webhook URL
@@ -70,7 +75,9 @@ Options:
     -rl, --rate-limit NUM       Rate limit for httpx (default: 150)
     -kd, --katana-depth NUM     Crawl depth for katana (default: 3)
     -kw, --katana-workers NUM   Parallel katana workers (default: CPU count)
+    -dw, --dirsearch-workers N  Parallel dirsearch workers (default: 4)
     -dt, --dirsearch-threads N  Dirsearch threads per host (default: 30)
+    -dto, --dirsearch-timeout N Dirsearch timeout seconds (default: 15)
     -dr, --dirsearch-recursive  Enable recursive dirsearch
     -h, --help                  Show this help message
 ```
@@ -81,9 +88,9 @@ Options:
 
 | Profile | Behavior |
 |---|---|
-| `quick` | Lower threads/rate/depth, faster pass, defaults nuclei to `high,critical` |
+| `quick` | Lower threads/rate/depth, lighter dirsearch concurrency, defaults nuclei to `high,critical` |
 | `standard` | Balanced defaults |
-| `deep` | Higher threads/rate/depth, recursive dirsearch enabled, wider nuclei severities (`low,medium,high,critical`) |
+| `deep` | Higher threads/rate/depth, higher dirsearch concurrency + recursion, wider nuclei severities (`low,medium,high,critical`) |
 
 You can still override any value with flags (`-t`, `-rl`, `-kd`, `-kw`, `-dt`, `-dr`, `-ns`).
 
@@ -96,6 +103,7 @@ Diff mode compares your current run against a previous baseline and generates:
 - added/removed URLs
 - added/removed dirsearch paths
 - new/resolved nuclei findings
+- added/removed/changed screenshots
 
 Usage:
 
@@ -155,6 +163,8 @@ recon_results/
 │   └── *_crawl.txt
 ├── dirsearch_<timestamp>/
 │   └── *_dirsearch.txt
+├── screenshots_<timestamp>/
+│   └── *.png
 ├── nuclei_<timestamp>/
 │   ├── nuclei_findings.txt
 │   └── nuclei_findings.jsonl
@@ -247,3 +257,26 @@ recon_results/
 Security and safety:
 - `sqlmap` is powerful; use with permission and be mindful of risk/rate settings and target impact.
 
+## Visual snapshot capture and diff
+
+This release adds visual recon snapshots with `gowitness`:
+
+- Captures screenshots for discovered live hosts into `screenshots_<timestamp>/`
+- Includes screenshot counts in HTML and master reports
+- In diff mode, compares screenshots against baseline and reports:
+  - new screenshots
+  - removed screenshots
+  - changed screenshots (same file path, different content hash)
+
+CLI examples:
+
+```bash
+# default behavior (enabled)
+./webrecon -d example.com
+
+# disable screenshots
+./webrecon -d example.com --no-screenshot
+
+# tune screenshot stage
+./webrecon -d example.com --screenshot-workers 8 --screenshot-timeout 30
+```
