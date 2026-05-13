@@ -757,6 +757,7 @@ func runDirsearchParallel(urls []string, outDir string, workers, dirsearchThread
 				"--no-color",
 				"--full-url",
 				"--format=plain",
+				"--exclude-status", "403,404",
 				"-o", outFile,
 				"-t", strconv.Itoa(dirsearchThreads),
 				"--timeout", strconv.Itoa(timeoutSec),

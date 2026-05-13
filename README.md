@@ -6,6 +6,7 @@ Automated reconnaissance pipeline with:
 - live host probing (`httpx`)
 - crawling (`katana`)
 - content/path discovery (`dirsearch`)
+  - excludes `403` and `404` responses by default
 - visual snapshots (`gowitness`)
 - vulnerability scanning (`nuclei`)
 - differential change tracking (`diff mode`)
